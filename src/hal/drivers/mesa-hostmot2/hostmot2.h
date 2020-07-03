@@ -43,7 +43,7 @@ char **argv_split(gfp_t gfp, const char *str, int *argcp);
 #endif
 
 #ifndef FIRMWARE_NAME_MAX
-    #define FIRMWARE_NAME_MAX  62
+    #define FIRMWARE_NAME_MAX  30
 #endif
 
 #define HM2_VERSION "0.15"
@@ -88,6 +88,8 @@ char **argv_split(gfp_t gfp, const char *str, int *argcp);
 #define HM2_CONFIGNAME_LENGTH  (8)
 
 #define HM2_ADDR_IDROM_OFFSET (0x010C)
+
+#define HM2_ADDR_WATCHDOG (0x0C00)
 
 #define HM2_MAX_MODULE_DESCRIPTORS  (48)
 #define HM2_MAX_PIN_DESCRIPTORS     (1000)
@@ -299,6 +301,7 @@ typedef struct {
 // encoders
 //
 
+#define HM2_ENCODER_INDEX_MODE          (1<<16)
 #define HM2_ENCODER_QUADRATURE_ERROR    (1<<15)
 #define HM2_ENCODER_AB_MASK_POLARITY    (1<<14)
 #define HM2_ENCODER_LATCH_ON_PROBE      (1<<13)
@@ -315,7 +318,8 @@ typedef struct {
 #define HM2_ENCODER_INPUT_B             (1<<1)
 #define HM2_ENCODER_INPUT_A             (1<<0)
 
-#define HM2_ENCODER_CONTROL_MASK  (0x0000ffff)
+#define HM2_ENCODER_CONTROL_MASK  (0x0001ffff)
+
 
 #define hm2_encoder_get_reg_count(encoder, instance)     (encoder->counter_reg[instance] & 0x0000ffff)
 #define hm2_encoder_get_reg_timestamp(encoder, instance) ((encoder->counter_reg[instance] >> 16) & 0x0000ffff)
@@ -348,6 +352,7 @@ typedef struct {
             hal_bit_t *index_mask;
             hal_bit_t *index_mask_invert;
             hal_bit_t *counter_mode;
+            hal_bit_t *index_mode;
             hal_bit_t *filter;
             hal_float_t *vel_timeout;
         } pin;
@@ -379,6 +384,7 @@ typedef struct {
     struct {
         hal_u32_t *sample_frequency;
         hal_u32_t *skew;
+        hal_s32_t *dpll_timer_num;
     } pin;
 } hm2_encoder_module_global_t;
 
@@ -396,6 +402,7 @@ typedef struct {
     u32 written_sample_frequency;
     int has_skew;
     u32 written_skew;
+    uint32_t desired_dpll_timer_reg, written_dpll_timer_reg;
 
     // hw registers
     u32 counter_addr;
@@ -414,6 +421,8 @@ typedef struct {
     u32 prev_timestamp_count_reg;
 
     u32 filter_rate_addr;
+
+    u32 dpll_timer_num_addr;
 } hm2_encoder_t;
 
 //
@@ -829,8 +838,8 @@ typedef struct {
     u32 register_stride;
     u32 instance_stride;
     char name[HAL_NAME_LEN+1];
-    void *read_function;
-    void *write_function;
+    int (*read_function)(void*);
+    int (*write_function)(void*);
     void *subdata;
 } hm2_bspi_instance_t;
 
@@ -927,6 +936,7 @@ typedef struct {
     u32 base_rate_addr;
     u32 base_rate_written;
     u32 phase_err_addr;
+    u32 *phase_err_reg;
     u32 control_reg0_addr;
     u32 control_reg0_written;
     u32 control_reg1_addr;
@@ -938,7 +948,6 @@ typedef struct {
     u32 timer_34_written;
     u32 hm2_dpll_sync_addr;
     u32 *hm2_dpll_sync_reg;
-    u32 *phase_err_reg;
     u32 clock_frequency;
 
 } hm2_dpll_t ;
@@ -1261,7 +1270,11 @@ int hm2_register_tram_read_region(hostmot2_t *hm2, u16 addr, u16 size, u32 **buf
 int hm2_register_tram_write_region(hostmot2_t *hm2, u16 addr, u16 size, u32 **buffer);
 int hm2_allocate_tram_regions(hostmot2_t *hm2);
 int hm2_tram_read(hostmot2_t *hm2);
+
+int hm2_finish_read(hostmot2_t *hm2);
+int hm2_queue_read(hostmot2_t *hm2);
 int hm2_tram_write(hostmot2_t *hm2);
+int hm2_finish_write(hostmot2_t *hm2);
 void hm2_tram_cleanup(hostmot2_t *hm2);
 
 
@@ -1306,24 +1319,13 @@ void hm2_ioport_gpio_write(hostmot2_t *hm2);
 // encoder functions
 //
 
-int hm2_encoder_parse_md(hostmot2_t *hm2,
-			 hm2_encoder_t *encoder,
-			 int md_index,
-			 int num_encs);
-void hm2_encoder_tram_init(hostmot2_t *hm2,
-			   hm2_encoder_t *encoder);
-void hm2_encoder_process_tram_read(hostmot2_t *hm2,
-				   hm2_encoder_t *encoder,
-				   long l_period_ns);
-void hm2_encoder_write(hostmot2_t *hm2,
-		       hm2_encoder_t *encoder);
-void hm2_encoder_cleanup(hostmot2_t *hm2,
-			 hm2_encoder_t *encoder);
-void hm2_encoder_print_module(hostmot2_t *hm2,
-			      hm2_encoder_t *encoder,
-			      char *tag);
-void hm2_encoder_force_write(hostmot2_t *hm2,
-			     hm2_encoder_t *encoder);
+int hm2_encoder_parse_md(hostmot2_t *hm2, hm2_encoder_t *encoder, int md_index, int num_encs);
+void hm2_encoder_tram_init(hostmot2_t *hm2, hm2_encoder_t *encoder);
+void hm2_encoder_process_tram_read(hostmot2_t *hm2, hm2_encoder_t *encoder, long l_period_ns);
+void hm2_encoder_write(hostmot2_t *hm2, hm2_encoder_t *encoder);
+void hm2_encoder_cleanup(hostmot2_t *hm2, hm2_encoder_t *encoder);
+void hm2_encoder_print_module(hostmot2_t *hm2, hm2_encoder_t *encoder, char *tag);
+void hm2_encoder_force_write(hostmot2_t *hm2, hm2_encoder_t *encoder);
 
 
 //
@@ -1371,7 +1373,8 @@ void hm2_tp_pwmgen_cleanup(hostmot2_t *hm2);
 void hm2_tp_pwmgen_write(hostmot2_t *hm2);
 void hm2_tp_pwmgen_force_write(hostmot2_t *hm2);
 void hm2_tp_pwmgen_prepare_tram_write(hostmot2_t *hm2);
-void hm2_tp_pwmgen_read(hostmot2_t *hm2);
+void hm2_tp_pwmgen_queue_read(hostmot2_t *hm2);
+void hm2_tp_pwmgen_process_read(hostmot2_t *hm2);
 
 
 //
@@ -1399,7 +1402,8 @@ int hm2_sserial_read_pins(hm2_sserial_remote_t *chan);
 void hm2_sserial_process_tram_read(hostmot2_t *hm2, long period);
 void hm2_sserial_cleanup(hostmot2_t *hm2);
 int hm2_sserial_waitfor(hostmot2_t *hm2, u32 addr, u32 mask, int ms);
-int hm2_sserial_check_errors(hostmot2_t *hm2, hm2_sserial_instance_t *inst);
+int hm2_sserial_check_local_errors(hostmot2_t *hm2, hm2_sserial_instance_t *inst);
+int hm2_sserial_check_remote_errors(hostmot2_t *hm2, hm2_sserial_instance_t *inst);
 int hm2_sserial_setup_channel(hostmot2_t *hm2, hm2_sserial_instance_t *inst, int index);
 int hm2_sserial_setup_remotes(hostmot2_t *hm2, hm2_sserial_instance_t *inst, hm2_module_descriptor_t *md);
 void hm2_sserial_setmode(hostmot2_t *hm2, hm2_sserial_instance_t *inst);
@@ -1467,6 +1471,7 @@ int hm2_dpll_force_write(hostmot2_t *hm2);
 int hm2_dpll_parse_md(hostmot2_t *hm2, int md_index);
 void hm2_dpll_process_tram_read(hostmot2_t *hm2, long period);
 void hm2_dpll_write(hostmot2_t *hm2, long period);
+void hm2_dpll_reset(hostmot2_t *hm2);
 
 //
 // irq functions
@@ -1486,6 +1491,8 @@ void hm2_watchdog_prepare_tram_write(hostmot2_t *hm2);
 void hm2_watchdog_write(hostmot2_t *hm2, long period);
 void hm2_watchdog_force_write(hostmot2_t *hm2);
 void hm2_watchdog_process_tram_read(hostmot2_t *hm2);
+// return 1 if io_error
+int hm2_watchdog_bite_on_ioerror(hostmot2_t *hm2);
 
 
 
@@ -1511,7 +1518,7 @@ void hm2_fwid_cleanup(hostmot2_t *hm2);
 //
 
 int hm2_raw_setup(hostmot2_t *hm2);
-void hm2_raw_read(hostmot2_t *hm2);
+void hm2_raw_queue_read(hostmot2_t *hm2);
 void hm2_raw_write(hostmot2_t *hm2);
 
 

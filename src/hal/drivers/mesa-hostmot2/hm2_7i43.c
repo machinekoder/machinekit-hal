@@ -69,9 +69,9 @@ static hm2_7i43_t board[HM2_7I43_MAX_BOARDS];
 static int num_boards;
 
 
-// 
+//
 // EPP I/O code
-// 
+//
 
 static inline void hm2_7i43_epp_addr8(u8 addr, hm2_7i43_t *board) {
     outb(addr, board->port.base + HM2_7I43_EPP_ADDRESS_OFFSET);
@@ -193,7 +193,7 @@ static void hm2_7i43_nanosleep(unsigned long int nanoseconds) {
 
 
 
-// 
+//
 // these are the low-level i/o functions exported to the hostmot2 driver
 //
 
@@ -227,7 +227,7 @@ int hm2_7i43_read(hm2_lowlevel_io_t *this, u32 addr, void *buffer, int size) {
 
 
 
-int hm2_7i43_write(hm2_lowlevel_io_t *this, u32 addr, void *buffer, int size) {
+int hm2_7i43_write(hm2_lowlevel_io_t *this, u32 addr, const void *buffer, int size) {
     int bytes_remaining = size;
     hm2_7i43_t *board = this->private;
 
@@ -350,7 +350,7 @@ int hm2_7i43_reset(hm2_lowlevel_io_t *this) {
     hm2_7i43_epp_write(0x5A, board);
 
 
-    // 
+    //
     // this code resets the FPGA *only* if the CPLD is in charge of the
     // parallel port
     //
@@ -417,7 +417,7 @@ static int hm2_7i43_setup(void) {
 
         //
         // claim the I/O regions for the parport
-        // 
+        //
 
         r = hal_parport_get(comp_id, &board[i].port,
                 ioaddr[i], ioaddr_hi[i], PARPORT_MODE_EPP);
@@ -525,4 +525,3 @@ void rtapi_app_exit(void) {
     hal_exit(comp_id);
     LL_PRINT("driver unloaded\n");
 }
-

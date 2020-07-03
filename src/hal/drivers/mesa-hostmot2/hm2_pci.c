@@ -207,7 +207,7 @@ MODULE_DEVICE_TABLE(pci, hm2_pci_tbl);
 
 
 
-// 
+//
 // these are the "low-level I/O" functions exported up
 //
 
@@ -241,7 +241,7 @@ static int hm2_pci_read(hm2_lowlevel_io_t *this, u32 addr, void *buffer, int siz
     return 1;  // success
 }
 
-static int hm2_pci_write(hm2_lowlevel_io_t *this, u32 addr, void *buffer, int size) {
+static int hm2_pci_write(hm2_lowlevel_io_t *this, u32 addr, const void *buffer, int size) {
     hm2_pci_t *board = this->private;
     int i;
     u32* src = (u32*) buffer;
@@ -452,7 +452,7 @@ static int hm2_plx9054_reset(hm2_lowlevel_io_t *this) {
 
 
 
-// 
+//
 // misc internal functions
 //
 
@@ -839,4 +839,3 @@ void rtapi_app_exit(void) {
     LL_PRINT("driver unloaded\n");
     hal_exit(comp_id);
 }
-

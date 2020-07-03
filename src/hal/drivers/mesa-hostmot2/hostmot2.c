@@ -46,6 +46,7 @@ MODULE_LICENSE("GPL");
 
 
 
+
 int debug_idrom = 0;
 RTAPI_MP_INT(debug_idrom, "Developer/debug use only!  Enable debug logging of the HostMot2\nIDROM header.");
 
@@ -71,19 +72,51 @@ struct list_head hm2_list;
 
 static int comp_id;
 
+
+
+
 //
 // functions exported to LinuxCNC
 //
+
+static int hm2_read_request(void *void_hm2, const hal_funct_args_t *fa) {
+    hostmot2_t *hm2 = void_hm2;
+    long period = fa_current_period(fa);
+    hm2->llio->period = period;
+
+    // if there are comm problems, wait for the user to fix it
+    if (hm2_watchdog_bite_on_ioerror(hm2)) return 0;
+
+    hm2_tram_read(hm2);
+    if (hm2_watchdog_bite_on_ioerror(hm2)) return 0;
+
+    hm2_raw_queue_read(hm2);
+    hm2_tp_pwmgen_queue_read(hm2);
+    if (hm2_watchdog_bite_on_ioerror(hm2)) return 0;
+
+    hm2_queue_read(hm2);
+    hm2->llio->read_requested = true;
+    hm2->llio->read_time = rtapi_get_time();
+
+    return 0;
+}
 
 static int hm2_read(void *void_hm2, const hal_funct_args_t *fa) {
     hostmot2_t *hm2 = void_hm2;
     long period = fa_current_period(fa);
 
-    // if there are comm problems, wait for the user to fix it
-    if ((*hm2->llio->hal->pin.io_error) != 0) return -1;
+    if(!hm2->llio->read_requested) hm2_read_request(void_hm2, fa);
+    hm2->llio->read_requested = false;
 
-    hm2_tram_read(hm2);
-    if ((*hm2->llio->hal->pin.io_error) != 0) return -1;
+    // if there are comm problems, wait for the user to fix it
+    if (hm2_watchdog_bite_on_ioerror(hm2)) return 0;
+
+    // if there's a temporary read failure, don't sweat it
+    if(hm2_finish_read(hm2) == -EAGAIN) return 0;
+
+    // if there are comm problems, wait for the user to fix it
+    if (hm2_watchdog_bite_on_ioerror(hm2)) return 0;
+
     hm2_watchdog_process_tram_read(hm2);
     hm2_ioport_gpio_process_tram_read(hm2);
     hm2_encoder_process_tram_read(hm2, &hm2->encoder, period);
@@ -95,9 +128,8 @@ static int hm2_read(void *void_hm2, const hal_funct_args_t *fa) {
     hm2_absenc_process_tram_read(hm2, period);
     //UARTS need to be explicity handled by an external component
 
-    hm2_tp_pwmgen_read(hm2); // check the status of the fault bit
+    hm2_tp_pwmgen_process_read(hm2); // check the status of the fault bit
     hm2_dpll_process_tram_read(hm2, period);
-    hm2_raw_read(hm2);
     de0_nano_soc_adc_read(hm2);
     hm2_capsense_read(hm2);
     return 0;
@@ -109,7 +141,7 @@ static int hm2_write(void *void_hm2, const hal_funct_args_t *fa) {
     long period = fa_current_period(fa);
 
     // if there are comm problems, wait for the user to fix it
-    if ((*hm2->llio->hal->pin.io_error) != 0) return -1;
+    if (hm2_watchdog_bite_on_ioerror(hm2)) return 0;
 
     hm2_ioport_gpio_prepare_tram_write(hm2);
     hm2_pwmgen_prepare_tram_write(hm2);
@@ -134,9 +166,10 @@ static int hm2_write(void *void_hm2, const hal_funct_args_t *fa) {
     hm2_resolver_write(hm2, period); // Update the excitation frequency
     hm2_dpll_write(hm2, period); // Update the timer phases
     hm2_irq_write(hm2); // Update the irq period - after dpll call
-    hm2_led_write(hm2);	      // Update on-board LEDs
+    hm2_led_write(hm2);      // Update on-board LEDs
 
     hm2_raw_write(hm2);
+    hm2_finish_write(hm2);
     return 0;
 }
 
@@ -144,7 +177,7 @@ static int hm2_read_gpio(void *void_hm2, const hal_funct_args_t *fa) {
     hostmot2_t *hm2 = void_hm2;
 
     // if there are comm problems, wait for the user to fix it
-    if ((*hm2->llio->hal->pin.io_error) != 0) return -1;
+    if (hm2_watchdog_bite_on_ioerror(hm2)) return 0;
 
     hm2_ioport_gpio_read(hm2);
     return 0;
@@ -156,7 +189,7 @@ static int hm2_write_gpio(void *void_hm2, const hal_funct_args_t *fa) {
     long period = fa_current_period(fa);
 
     // if there are comm problems, wait for the user to fix it
-    if ((*hm2->llio->hal->pin.io_error) != 0) return -1;
+    if (hm2_watchdog_bite_on_ioerror(hm2)) return 0;
 
     hm2_ioport_gpio_write(hm2);
     hm2_watchdog_write(hm2, period);
@@ -1105,13 +1138,13 @@ static void hm2_release_device(struct device *dev) {
     // nothing to do here
 }
 
-static int dummy_queue_write(hm2_lowlevel_io_t *this, u32 addr, void *buffer, int size) {
-    if(size != -1) return this->write(this, addr, buffer, size);
+static int dummy_queue_write(hm2_lowlevel_io_t *this, u32 addr, const void *buffer, int size) {
+    if(size >= 0) return this->write(this, addr, buffer, size);
     return 1; // success
 }
 
 static int dummy_queue_read(hm2_lowlevel_io_t *this, u32 addr, void *buffer, int size) {
-    if(size != -1) return this->read(this, addr, buffer, size);
+    if(size >= 0) return this->read(this, addr, buffer, size);
     return 1; // success
 }
 
@@ -1153,6 +1186,45 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
         if (i == 0) {
             HM2_ERR_NO_LL("invalid llio name passed in (zero length)\n");
             return -EINVAL;
+        }
+    }
+
+
+    //
+    // verify llio ioport connector names
+    //
+
+    if ((llio->num_ioport_connectors < 1) || (llio->num_ioport_connectors > ANYIO_MAX_IOPORT_CONNECTORS)) {
+        HM2_ERR_NO_LL("llio reports invalid number of I/O connectors (%d)\n", llio->num_ioport_connectors);
+        return -EINVAL;
+    }
+
+    {
+        int port;
+
+        for (port = 0; port < llio->num_ioport_connectors; port ++) {
+            int i;
+
+            if (llio->ioport_connector_name[port] == NULL) {
+                HM2_ERR_NO_LL("llio ioport connector name %d is NULL\n", port);
+                return -EINVAL;
+            }
+
+            for (i = 0; i < HAL_NAME_LEN+1; i ++) {
+                if (llio->ioport_connector_name[port][i] == '\0') break;
+                if (!isprint(llio->ioport_connector_name[port][i])) {
+                    HM2_ERR_NO_LL("invalid llio ioport connector name %d passed in (contains non-printable character)\n", port);
+                    return -EINVAL;
+                }
+            }
+            if (i == HAL_NAME_LEN+1) {
+                HM2_ERR_NO_LL("invalid llio ioport connector name %d passed in (not NULL terminated)\n", port);
+                return -EINVAL;
+            }
+            if (i == 0) {
+                HM2_ERR_NO_LL("invalid llio ioport connector name %d passed in (zero length)\n", port);
+                return -EINVAL;
+            }
         }
     }
 
@@ -1333,7 +1405,7 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
 
 
     //
-    // export a parameter to deal with communication errors
+    // export a pin to deal with communication errors
     // NOTE: this is really only useful for EPP boards, PCI doesnt use it
     //
 
@@ -1341,7 +1413,8 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
         llio->hal = (hm2_low_level_io_global_t *)hal_malloc(sizeof(hm2_low_level_io_global_t));
         if (llio->hal == NULL) {
             HM2_ERR("out of memory!\n");
-            return -ENOMEM;
+            r = -ENOMEM;
+            goto fail0;
         }
         r = hal_pin_bit_newf(
                 HAL_IO,
@@ -1358,13 +1431,14 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
         *llio->hal->pin.io_error = 0;
     }
 
+    HM2_PRINT("Low Level init %s\n", HM2_VERSION);
 
     //
     // read & verify FPGA firmware IOCookie
     //
 
     {
-        u32 cookie;
+        uint32_t cookie;
 
         if (!llio->read(llio, HM2_ADDR_IOCOOKIE, &cookie, 4)) {
             HM2_ERR("error reading hm2 cookie\n");
@@ -1392,44 +1466,6 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
     } else
 	HM2_INFO("skipping fwid parse");
 
-
-    //
-    // verify llio ioport connector names
-    //
-
-    if ((llio->num_ioport_connectors < 1) || (llio->num_ioport_connectors > ANYIO_MAX_IOPORT_CONNECTORS)) {
-        HM2_ERR_NO_LL("llio reports invalid number of I/O connectors (%d)\n", llio->num_ioport_connectors);
-        return -EINVAL;
-    }
-
-    {
-        int port;
-
-        for (port = 0; port < llio->num_ioport_connectors; port ++) {
-            int i;
-
-            if (llio->ioport_connector_name[port] == NULL) {
-                HM2_ERR_NO_LL("llio ioport connector name %d is NULL\n", port);
-                return -EINVAL;
-            }
-
-            for (i = 0; i < HAL_NAME_LEN+1; i ++) {
-                if (llio->ioport_connector_name[port][i] == '\0') break;
-                if (!isprint(llio->ioport_connector_name[port][i])) {
-                    HM2_ERR_NO_LL("invalid llio ioport connector name %d passed in (contains non-printable character)\n", port);
-                    return -EINVAL;
-                }
-            }
-            if (i == HAL_NAME_LEN+1) {
-                HM2_ERR_NO_LL("invalid llio ioport connector name %d passed in (not NULL terminated)\n", port);
-                return -EINVAL;
-            }
-            if (i == 0) {
-                HM2_ERR_NO_LL("invalid llio ioport connector name %d passed in (zero length)\n", port);
-                return -EINVAL;
-            }
-        }
-    }
 
     //
     // read & verify FPGA firmware ConfigName
@@ -1516,6 +1552,7 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
 
     r = hm2_ioport_gpio_export_hal(hm2);
     if (r != 0) {
+        HM2_ERR("error exporting gpio pins\n");
         goto fail1;
     }
 
@@ -1525,6 +1562,7 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
 
     r = hm2_raw_setup(hm2);
     if (r != 0) {
+        HM2_ERR("error setting up raw interface\n");
         goto fail1;
     }
 
@@ -1535,6 +1573,7 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
 
     r = hm2_adc_setup(hm2);
     if (r != 0) {
+        HM2_ERR("error setting up ADC\n");
         goto fail1;
     }
 
@@ -1571,6 +1610,19 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
 
     r = hm2_tram_read(hm2);
     if (r != 0) {
+        HM2_ERR("error reading TRAM\n");
+        goto fail1;
+    }
+
+    r = hm2_queue_read(hm2);
+    if (r != 0) {
+        HM2_ERR("error executing queued read\n");
+        goto fail1;
+    }
+
+    r = hm2_finish_read(hm2);
+    if (r != 0) {
+        HM2_ERR("error finishing read\n");
         goto fail1;
     }
 
@@ -1587,6 +1639,7 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
     // initialize step accumulator, hal count & position to 0
     hm2_stepgen_tram_init(hm2);
     hm2_stepgen_process_tram_read(hm2, 1000);
+
 
     //
     // write the TRAM one first time
@@ -1605,9 +1658,15 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
 
     r = hm2_tram_write(hm2);
     if (r != 0) {
+        HM2_ERR("error writing TRAM\n");
         goto fail1;
     }
 
+    r = hm2_finish_write(hm2);
+    if (r != 0) {
+        HM2_ERR("error finishing write\n");
+        goto fail1;
+    }
 
     //
     // final check for comm errors
@@ -1650,7 +1709,23 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
     //
 
     {
-
+    if(hm2->llio->split_read) {
+        hal_export_xfunct_args_t read_request_args = {
+            .type = FS_XTHREADFUNC,
+            .funct.x = hm2_read_request,
+            .arg = hm2,
+            .uses_fp = 1,
+            .reentrant = 0,
+            .owner_id = hm2->llio->comp_id
+        };
+        if ((r = hal_export_xfunctf(&read_request_args,
+                                    "%s.read-request",
+                                    hm2->llio->name)) != 0) {
+            HM2_ERR("hal_export_xfunctf(%s.read-request) failed: %d\n",
+                    hm2->llio->name, r);
+            return r;
+        }
+    }
 	hal_export_xfunct_args_t read_args = {
 	    .type = FS_XTHREADFUNC,
 	    .funct.x = hm2_read,
@@ -1724,6 +1799,7 @@ int hm2_register(hm2_lowlevel_io_t *llio, char *config_string) {
 	}
 
     }
+
 
     //
     // found one!
